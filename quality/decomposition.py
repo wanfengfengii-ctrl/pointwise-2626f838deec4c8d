@@ -1,13 +1,123 @@
 from quality.encoding import Interval
-from topology.f2 import matrix_rank
+from topology.f2 import apply_columns, kernel_basis, matrix_rank
+
+
+def _window_offsets(dimensions, first, last):
+    offsets = {}
+    width = 0
+    for node in range(first, last + 1):
+        offsets[node] = width
+        width += dimensions[node]
+    return offsets, width
+
+
+def _arrow_table(maps):
+    return {(arrow.source, arrow.target): tuple(arrow.columns) for arrow in maps}
+
+
+def _is_timeline(table, count):
+    expected = {(source, target) for source in range(1, count, 2) for target in (source - 1, source + 1)}
+    return set(table) == expected and all(source % 2 == 1 for source, _ in table)
+
+
+def _generic_rank(dimensions, table, first, last):
+    offsets, width = _window_offsets(dimensions, first, last)
+    relations = []
+    equations = []
+    for (source, target), columns in table.items():
+        if not (first <= source <= last and first <= target <= last):
+            continue
+        source_offset = offsets[source]
+        target_offset = offsets[target]
+        for index, column in enumerate(columns):
+            relations.append((1 << (source_offset + index)) | (column << target_offset))
+        for coordinate in range(dimensions[target]):
+            row = 1 << (target_offset + coordinate)
+            for index, column in enumerate(columns):
+                if (column >> coordinate) & 1:
+                    row |= 1 << (source_offset + index)
+            equations.append(row)
+    compatible = kernel_basis(equations, width)
+    first_mask = (1 << dimensions[first]) - 1
+    projections = [(vector >> offsets[first]) & first_mask for vector in compatible]
+    return matrix_rank(relations + projections) - matrix_rank(relations)
+
+
+def _alternating_rank(dimensions, table, first, last):
+    offsets, _ = _window_offsets(dimensions, first, last)
+    common = [node for node in range(first, last + 1) if node % 2 == 1]
+    common_offsets = {}
+    common_width = 0
+    for node in common:
+        common_offsets[node] = common_width
+        common_width += dimensions[node]
+    # Every common node is free; each sample node takes the image of one
+    # neighbouring common node.  An interior sample node is reached from both
+    # sides, so its two images must agree.
+    neighbour = {node: (node - 1 if node - 1 >= first else node + 1)
+                 for node in range(first, last + 1) if node % 2 == 0}
+    equations = []
+    for node in range(first, last + 1):
+        if node % 2 != 0 or not (node - 1 >= first and node + 1 <= last):
+            continue
+        left, right = node - 1, node + 1
+        left_columns, right_columns = table[left, node], table[right, node]
+        left_offset, right_offset = common_offsets[left], common_offsets[right]
+        for coordinate in range(dimensions[node]):
+            row = 0
+            for index, column in enumerate(left_columns):
+                if (column >> coordinate) & 1:
+                    row |= 1 << (left_offset + index)
+            for index, column in enumerate(right_columns):
+                if (column >> coordinate) & 1:
+                    row |= 1 << (right_offset + index)
+            equations.append(row)
+    compatible = kernel_basis(equations, common_width)
+
+    def lift(vector):
+        lifted = 0
+        for node in common:
+            value = (vector >> common_offsets[node]) & ((1 << dimensions[node]) - 1)
+            lifted |= value << offsets[node]
+        for node, source in neighbour.items():
+            value = (vector >> common_offsets[source]) & ((1 << dimensions[source]) - 1)
+            lifted |= apply_columns(table[source, node], value) << offsets[node]
+        return lifted
+
+    relations = []
+    for (source, target), columns in table.items():
+        if not (first <= source <= last and first <= target <= last):
+            continue
+        source_offset = offsets[source]
+        target_offset = offsets[target]
+        for index, column in enumerate(columns):
+            relations.append((1 << (source_offset + index)) | (column << target_offset))
+    if first % 2 == 0:
+        columns = table[first + 1, first]
+        mask = (1 << dimensions[first + 1]) - 1
+        projections = [apply_columns(columns, (vector >> common_offsets[first + 1]) & mask)
+                       for vector in compatible]
+    else:
+        mask = (1 << dimensions[first]) - 1
+        projections = [(vector >> common_offsets[first]) & mask for vector in compatible]
+    return matrix_rank(relations + projections) - matrix_rank(relations)
 
 
 def subdiagram_rank(dimensions, maps, first, last):
-    capacity = min(dimensions[first:last + 1])
-    for arrow in maps:
-        if first <= arrow.source <= last and first <= arrow.target <= last:
-            capacity = min(capacity, matrix_rank(arrow.columns))
-    return capacity
+    """Rank of the induced limit map over the closed window [first, last].
+
+    The rank invariant of a zigzag diagram is the dimension of the compatible
+    tuples on the window modulo the tuples generated by single arrows.  Only
+    the arrows with both endpoints inside the window participate.
+    """
+    if first > last:
+        return 0
+    if first == last:
+        return dimensions[first]
+    table = _arrow_table(maps)
+    if _is_timeline(table, len(dimensions)):
+        return _alternating_rank(dimensions, table, first, last)
+    return _generic_rank(dimensions, table, first, last)
 
 
 def decompose_intervals(dimensions, maps):

@@ -4,7 +4,7 @@ from network.canonical import valid_digest
 from study.timeline import position_sources, timeline_arrows, validate_position_sources
 from topology.chains import inclusion_chain_map
 from topology.f2 import apply_columns
-from topology.homology import StaticSummary, compute_homology, static_summary
+from topology.homology import StaticSummary, compute_homology, cycle_coordinates, static_summary
 
 
 class AnalysisError(ValueError):
@@ -39,8 +39,9 @@ class FrozenAnalysis:
 
 def build_induced_map(source_index, target_index, source, target):
     _, transport, _ = inclusion_chain_map(source.chain, target.chain)
-    target_slots = {cycle: 1 << index for index, cycle in enumerate(target.representatives)}
-    columns = tuple(target_slots.get(apply_columns(transport, cycle), 0)
+    # The inclusion of a source cycle is a target cycle; its class may be any
+    # combination of the target's frozen homology basis plus target boundaries.
+    columns = tuple(cycle_coordinates(target, apply_columns(transport, cycle))
                     for cycle in source.representatives)
     return InducedMap(source_index, target_index, len(source.representatives), len(target.representatives), columns)
 

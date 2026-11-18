@@ -11,7 +11,8 @@ from quality.decomposition import subdiagram_rank
 from quality.lifetimes import InvalidAnalysis
 from quality.reports import ReportService
 from study.cohorts import StudyService
-from topology.f2 import matrix_rank
+from topology.f2 import apply_columns, matrix_rank
+from topology.chains import inclusion_chain_map
 from topology.homology import compute_homology
 from topology.inclusions import AnalysisService, build_induced_map, validate_analysis_relations
 
@@ -158,6 +159,43 @@ class LifetimeTests(unittest.TestCase):
                     self.assertEqual(subdiagram_rank(analysis.dimensions, analysis.maps, start, end), rank)
                     represented = sum(count for a, b, count in report.payload['intervals'] if a <= start <= end <= b)
                     self.assertEqual(represented, rank)
+
+    def test_induced_map_uses_actual_image_not_exact_representative(self):
+        # The common cycle of the first incident sample is a cycle of the
+        # second sample whose chain is not equal to either stored target
+        # representative, only homologous to one.  The frozen arrow must carry
+        # that actual class instead of collapsing to zero.
+        incident = [(list(range(1, 8)), [(1, 3), (1, 4), (3, 4)], []),
+                    (list(range(1, 8)),
+                     [(1, 3), (1, 4), (3, 4), (5, 6), (5, 7), (6, 7), (2, 3), (2, 4)], [(2, 3, 4)]),
+                    (list(range(1, 8)), [(5, 6), (5, 7), (6, 7)], [])]
+        study, fixed, _ = self.run_fixture('carry', incident)
+        analysis = validate_analysis_relations(fixed.payload)
+        self.assertEqual(analysis.dimensions, (1, 1, 2, 1, 1))
+        arrowing = {(arrow.source, arrow.target): arrow.columns for arrow in analysis.maps}
+        self.assertEqual(arrowing[1, 2], (1,))
+        source, target = compute_homology(study.positions[1].complex), compute_homology(study.positions[2].complex)
+        _, transport, _ = inclusion_chain_map(source.chain, target.chain)
+        moved = apply_columns(transport, source.representatives[0])
+        self.assertNotIn(moved, target.representatives)
+        self.assertNotEqual(build_induced_map(1, 2, source, target).columns, (0,))
+
+    def test_induced_map_tracks_changed_homology_basis(self):
+        # Replacing a source representative by a different cycle must show up
+        # as coordinates in the frozen target basis of whichever position the
+        # arrow lands on.
+        vertices = list(range(1, 7))
+        left = path(2) + path(3) + path(5)
+        right = path(2) + path(3) + path(6)
+        study, _, _ = self.run_fixture('basis', [(vertices, left, []), (vertices, right, [])])
+        space = compute_homology(validate_complex(vertices, left, []))
+        common = compute_homology(validate_complex(vertices, path(2) + path(3), []))
+        common_edges = {tuple(sorted(edge)) for edge in path(2) + path(3)}
+        shared = sum(1 << index for index, edge in enumerate(space.chain.complex.edges) if edge in common_edges)
+        alternative = next(cycle for cycle in space.representatives if cycle != shared)
+        changed = replace(space, representatives=(shared ^ alternative, alternative))
+        self.assertEqual(build_induced_map(1, 0, common, changed).columns, (0b11,))
+        self.assertEqual(build_induced_map(1, 0, common, space).columns, (0b01,))
 
     def test_empty_report_and_incomplete_analysis_rejected(self):
         study, analysis, report = self.run_fixture('empty', [([], [], []), ([1], [], [])])
